@@ -24,11 +24,11 @@
 #include <avformat.h>
 ...
 int main(int argc, charg *argv[]) {
-av_register_all();
+avformat_network_init();
 \end{lstlisting}
 
 
-这里注册了所有的文件格式和编解码器的库，所以它们将被自动的使用在被打开的合适格式的文件上。注意你只需要调用av_register_all()一次，因此我们在主函数main()中来调用它。如果你喜欢，也可以只注册特定的格式和编解码器，但是通常你没有必要这样做。
+只有在打开网络文件的时候才需要调用。
 
 现在我们可以真正的打开文件：
 \begin{lstlisting}
@@ -57,33 +57,21 @@ dump_format(pFormatCtx, 0, argv[1], 0);
 
 现在pFormatCtx->streams 仅仅是一组大小为pFormatCtx->nb_streams的指针，所以让我们先跳过它直到我们找到一个视频流。
 \begin{lstlisting}
-int i;
+AVCodec *pCodec;
 AVCodecContext *pCodecCtx;
 
 // Find the first video stream
-videoStream=-1;
-for(i=0; i<pFormatCtx->nb_streams; i++)
-  if(pFormatCtx->streams[i]->codec->codec_type==CODEC_TYPE_VIDEO) {
-    videoStream=i;
-    break;
-  }
+videoStream=av_find_best_stream(pFormatCtx, AVMEDIA_TYPE_VIDEO, -1, -1, &pCodec, 0);
 if(videoStream==-1)
   return -1; // Didn't find a video stream
 
 // Get a pointer to the codec context for the video stream
-pCodecCtx=pFormatCtx->streams[videoStream]->codec;
+pCodecCtx = avcodec_alloc_context3(pCodec);
+avcodec_parameters_to_context(pCodecCtx, pFormatCtx->streams[videoStream]->codecpar);
 \end{lstlisting}
 
-流中关于编解码器的信息就是被我们叫做“编解码器上下文”（codec context）的东西。这里面包含了流中所使用的关于编解码器的所有信息，现在我们有了一个指向它的指针。但是我们必需要找到真正的编解码器并且打开它：
+av_find_best_stream在pFormatCtx中查找指定type的流，如果找到了，并且传入的AVCodec **decoder_ret不为NULL，*decoder_ret会指向一个合法的AVCodec。该AVCodec可用于解码找到的流。流中关于编解码器的信息就是被我们叫做“编解码器上下文”（codec context）的东西。这里面包含了流中所使用的关于编解码器的所有信息，现在我们有了一个指向它的指针。但是我们必须要打开它：
 \begin{lstlisting}
-AVCodec *pCodec;
-
-// Find the decoder for the video stream
-pCodec=avcodec_find_decoder(pCodecCtx->codec_id);
-if(pCodec==NULL) {
-  fprintf(stderr, "Unsupported codec!\n");
-  return -1; // Codec not found
-}
 // Open codec
 if(avcodec_open(pCodecCtx, pCodec)<0)
   return -1; // Could not open codec
@@ -98,13 +86,13 @@ if(avcodec_open(pCodecCtx, pCodec)<0)
 AVFrame *pFrame;
 
 // Allocate video frame
-pFrame=avcodec_alloc_frame();
+pFrame=av_frame_alloc();
 \end{lstlisting}
 
 因为我们准备输出保存24位RGB色的PPM文件，我们必需把帧的格式从原来的转换为RGB。FFMPEG 将为我们做这些转换。在大多数项目中（包括我们的这个）我们都想把原始的帧转换成一个特定的格式。让我们先为转换来申请一帧的内存。
 \begin{lstlisting}
 // Allocate an AVFrame structure
-pFrameRGB=avcodec_alloc_frame();
+pFrameRGB=av_frame_alloc();
 if(pFrameRGB==NULL)
   return -1;
 \end{lstlisting}
@@ -112,66 +100,64 @@ if(pFrameRGB==NULL)
 即使我们申请了一帧的内存，当转换的时候，我们仍然需要一个地方来放置原始的数据。我们使用avpicture_get_size来获得我们需要的大小，然后手工申请内存空间：
 
 \begin{lstlisting}
-uint8_t *buffer;
 int numBytes;
 // Determine required buffer size and allocate buffer
-numBytes=avpicture_get_size(PIX_FMT_RGB24, pCodecCtx->width,
-                            pCodecCtx->height);
-buffer=(uint8_t *)av_malloc(numBytes*sizeof(uint8_t));
+numBytes=av_image_alloc(pFrameRGB->data, pFrameRGB->linesize, pCodecCtx->width,
+                            pCodecCtx->height, PIX_FMT_RGB24, 1);
 \end{lstlisting}
 
-av_malloc是ffmpeg的malloc，用来实现一个简单的malloc的包装，这样来保证内存地址是对齐的（4字节对齐或者2字节对齐）。它并不能保护你不被内存泄漏，重复释放或者其它malloc的问题所困扰。
+使用av_image_alloc申请内存并和pFrameRGB关联起来。
 
-现在我们使用avpicture_fill来把帧和我们新申请的内存来结合。关于AVPicture的结构：AVPicture结构体是AVFrame结构体的子集——AVFrame 结构体的开始部分与AVPicture结构体是一样的。
-
+要准备一个SwsContext，用来将解码后的帧转换为RGB格式。
 \begin{lstlisting}
-// Assign appropriate parts of buffer to image planes in pFrameRGB
-// Note that pFrameRGB is an AVFrame, but AVFrame is a superset
-// of AVPicture
-avpicture_fill((AVPicture *)pFrameRGB, buffer, PIX_FMT_RGB24,
-                pCodecCtx->width, pCodecCtx->height);
+struct SwsContext *swsContext = sws_getContext(pCodecCtx->width, pCodecCtx->height,AV_PIX_FMT_RGB24, pCodecCtx->width, pCodecCtx->height, pCodecCtx->pix_fmt, SWS_FAST_BILINEAR, NULL, NULL, NULL);
+if (!swsContext){
+  return -1;
+}
+if (sws_init_context(swsContext, NULL, NULL)<0){
+  return -1;
+}
 \end{lstlisting}
 
-最后，我们已经准备好来从流中读取数据了。
+SwsContext中包含了格式转换所需要的所有信息。最后，我们已经准备好来从流中读取数据了。
 
 \section{读取数据}
 
 我们将要做的是通过读取包来读取整个视频流，然后把它解码成帧，最后转换格式并且保存。
 \begin{lstlisting}
-int frameFinished;
+int i = 0;
 AVPacket packet;
 
-i=0;
 while(av_read_frame(pFormatCtx, &packet)>=0) {
-  // Is this a packet from the video stream?
-  if(packet.stream_index==videoStream) {
-    // Decode video frame
-    avcodec_decode_video(pCodecCtx, pFrame, &frameFinished,
-                         packet.data, packet.size);
+  // If this packet is not from video stream,skip it
+  if (packet.stream_index != videoStream){
+    av_packet_unref(&packet);
+    continue;
+  }
+  // send this packet to AVCodecContext
+  if (avcodec_send_packet(pCodecCtx, &packet)!=0){
+    break;
+  }
 
-    // Did we get a video frame?
-    if(frameFinished) {
-    // Convert the image from its native format to RGB
-        img_convert((AVPicture *)pFrameRGB, PIX_FMT_RGB24,
-            (AVPicture*)pFrame, pCodecCtx->pix_fmt,
-            pCodecCtx->width, pCodecCtx->height);
-
-        // Save the frame to disk
-        if(++i<=5)
-          SaveFrame(pFrameRGB, pCodecCtx->width,
-                    pCodecCtx->height, i);
+  // receive frame from AVCodecContext
+  while (avcodec_receive_frame(pCodecCtx, pFrame)==0){
+  // Convert the image from its native format to RGB
+    sws_scale(sws_context, pFrame->data, pFrame->linesize, 0 , height, pFrameRGB->data, pFrameRGB->linesize);
+    // Save the frame to disk
+    if(++i<=5){
+      SaveFrame(pFrameRGB, pCodecCtx->width, pCodecCtx->height, i);
     }
   }
 
   // Free the packet that was allocated by av_read_frame
-  av_free_packet(&packet);
+  av_packet_unref(&packet);
 }
 \end{lstlisting}
 
 \marginpar{\rule[-15mm]{0.4mm}{15mm}}{\textbf{关于包Packets 的注释：}\small 从技术上讲一个包可以包含部分或者其它的数据，但是ffmpeg的解释器保证了我们得到的包Packets 包含的要么是完整的要么是多个完整的帧。}
 
 
-这个循环过程是比较简单的：av_read_frame()读取一个包并且把它保存到AVPacket结构体中。注意我们仅仅申请了一个包的结构体——ffmpeg 为我们申请了内部的数据的内存并通过packet.data指针来指向它。这些数据可以在后面通过av_free_packet()来释放。函数avcodec_decode_video()把包转换为帧。然而当解码一个包的时候，我们可能没有得到我们需要的关于帧的信息。因此，当我们得到下一帧的时候，avcodec_decode_video()为我们设置了帧结束标志frameFinished。最后，我们使用img_convert()函数来把帧从原始格式（pCodecCtx->pix_fmt）转换成为RGB格式。要记住，你可以把一个AVFrame结构体的指针转换为AVPicture 结构体的指针。最后，我们把帧和高度宽度信息传递给我们的SaveFrame 函数。
+这个循环过程是比较简单的：av_read_frame()读取一个包并且把它保存到AVPacket结构体中。注意我们仅仅申请了一个包的结构体——ffmpeg 为我们申请了内部的数据的内存并通过packet.data指针来指向它。这些数据可以在后面通过av_free_packet()来释放。函数avcodec_send_packet()把包传递给AVCodecContext，函数avcodec_receive_frame()从AVCodecContext接收解码后的帧。一个包可能包含多个完整的帧，所以要在一个while循环中调用avcodec_receive_frame。最后，我们使用sws_scale()函数来把帧从原始格式（pCodecCtx->pix_fmt）转换成为RGB格式。最后，我们把帧和高度宽度信息传递给我们的SaveFrame 函数。
 
 现在我们需要做的是让SaveFrame函数能把RGB信息写入到一个PPM格式的文件中。我们将生成一个简单的PPM格式文件，请相信，它是可以工作的。
 
@@ -203,15 +189,16 @@ void SaveFrame(AVFrame *pFrame, int width, int height, int iFrame) {
 
 现在，回顾我们的main()函数。一旦我们开始读取完视频流，我们必需清理一切：
 \begin{lstlisting}
-// Free the RGB image
-av_free(buffer);
-av_free(pFrameRGB);
+av_frame_free(pFrameRGB);
 
 // Free the YUV frame
-av_free(pFrame);
+av_frame_free(pFrame);
 
-// Close the codec
-avcodec_close(pCodecCtx);
+// free the SwsContext
+sws_freeContext(swsContext);
+
+// free the codec context
+avcodec_free_context(pCodecCtx);
 
 // Close the video file
 av_close_input_file(pFormatCtx);
