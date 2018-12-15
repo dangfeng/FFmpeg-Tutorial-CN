@@ -8,8 +8,7 @@ SDL库中有许多种方式来在屏幕上绘制图形，而且它有一个特�
 于是，我们现在计划把教程1中的SaveFrame()函数替换掉，让它直接输出我们的帧到屏幕上去。但一开始我们必需要先看一下如何使用SDL库。首先我们必需先包含SDL库的头文件并且初始化它。
 
 \begin{lstlisting}
-#include <SDL.h>
-#include <SDL_thread.h>
+#include <SDL2/SDL.h>
 
 if(SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO | SDL_INIT_TIMER)) {
   fprintf(stderr, "Could not initialize SDL - %s\n", SDL_GetError());
@@ -21,79 +20,45 @@ SDL_Init()函数告诉了SDL库，哪些特性我们将要用到。当然SDL_Get
 
 \section{创建一个显示（Display）}
 
-现在我们需要在屏幕上的一个地方放上一些东西。在SDL中显示图像的基本区域叫做\textbf{surface}。
+现在我们需要在屏幕上的一个地方放上一些东西。
 
 \begin{lstlisting}
-SDL_Surface *screen;
+SDL_Window *window;
+SDL_Renderer *renderer;
+SDL_Texture *texture;
 
-screen = SDL_SetVideoMode(pCodecCtx->width, pCodecCtx->height, 0, 0);
-if(!screen) {
-  fprintf(stderr, "SDL: could not set video mode - exiting\n");
+window = SDL_CreateWindow("ffmpeg tutorial", SDL_WINDOWPOS_UNDEFINED, SDL_WINDOWPOS_UNDEFINED, pCodecCtx->width, pCodecCtx->height, SDL_WINDOW_SHOWN);
+if (!window){
+  fprintf(stderr, "SDL: could not CreateWindow - exiting\n");
+  exit(1);
+}
+renderer = SDL_CreateRenderer(window, -1, SDL_RENDERER_ACCELERATED | SDL_RENDERER_PRESENTVSYNC);
+if (renderer){
+  fprintf(stderr, "SDL: could not CreateRenderer - exiting\n");
+  exit(1);
+}
+texture = SDL_CreateTexture(renderer, SDL_PIXELFORMAT_IYUV, SDL_TEXTUREACCESS_STREAMING, pCodecCtx->width, pCodecCtx->height);
+if (texture){
+  fprintf(stderr, "SDL: could not CreateTexture - exiting\n");
   exit(1);
 }
 \end{lstlisting}
 
-这就创建了一个给定高度和宽度的屏幕。下一个选项是屏幕的颜色深度—— 0 表示使用和当前一样的深度。（这个在OS X系统上不能正常工作，原因请看源代码）现在我们在屏幕上来创建一个YUV 覆盖以便于我们输入视频上去：
-
-\begin{lstlisting}
-SDL_Overlay     *bmp;
-
-bmp = SDL_CreateYUVOverlay(pCodecCtx->width, pCodecCtx->height,
-                           SDL_YV12_OVERLAY, screen);
-\end{lstlisting}
-
-正如前面我们所说的，我们使用YV12来显示图像。
-
 \section{显示图像}
 
-前面那些都是很简单的。现在我们需要来显示图像。让我们看一下是如何来处理完成后的帧的。我们将原来对RGB处理的方式，并且替换SaveFrame()为显示到屏幕上的代码。为了显示到屏幕上，为我们的YUV 覆盖建立一个AVPicture结构体并且设置其数据指针和行尺寸（linesize）：
+前面那些都是很简单的。现在我们需要来显示图像。让我们看一下是如何来处理完成后的帧的。我们将原来对RGB处理的方式，并且替换SaveFrame()为显示到屏幕上的代码：
 
 \begin{lstlisting}
- if(frameFinished) {
-    SDL_LockYUVOverlay(bmp);
-
-    AVPicture pict;
-    pict.data[0] = bmp->pixels[0];
-    pict.data[1] = bmp->pixels[2];
-    pict.data[2] = bmp->pixels[1];
-
-    pict.linesize[0] = bmp->pitches[0];
-    pict.linesize[1] = bmp->pitches[2];
-    pict.linesize[2] = bmp->pitches[1];
-
-    // Convert the image into YUV format that SDL uses
-    img_convert(&pict, PIX_FMT_YUV420P,
-                    (AVPicture *)pFrame, pCodecCtx->pix_fmt,
-            pCodecCtx->width, pCodecCtx->height);
-
-    SDL_UnlockYUVOverlay(bmp);
-  }
+while (avcodec_receive_frame(pCodecCtx, pFrame) == 0) {
+  sws_scale(swsContext, pFrame->data, pFrame->linesize, 0, pCodecCtx->height, pFrameYUV->data, pFrameYUV->linesize);
+  SDL_RenderClear(renderer);
+  SDL_UpdateTexture(texture, NULL, pFrameYUV->data[0], pFrameYUV->linesize[0]);
+  SDL_RenderCopy(renderer, texture, NULL, NULL);
+  SDL_RenderPresent(renderer);
+}
 \end{lstlisting}
 
-首先，我们锁定这个覆盖，因为我们将要去改写它。这是一个避免以后发生问题的好习惯。正如前面所示的，这个AVPicture结构体有一个数据指针指向一个有4个元素的指针数组。由于我们处理的是YUV420P，所以我们只需要3个通道即只要三组数据。其它的格式可能需要第四个指针来表示alpha通道或者其它参数。行尺寸正如它的名字表示的意义一样。在YUV 覆盖中相同功能的结构体是像素（pixel）和间距（pitch）。 （“间距”是在SDL里用来表示指定行数据宽度的值）。所以我们现在做的是让我们的pict.data 中的三个数组指针指向我们的覆盖，这样当我们写（数据）到pict的时候，实际上是写入到我们的覆盖中，当然要先申请必要的空间。类似的，我们可以直接从覆盖中得到行尺寸信息。像前面一样我们使用img_convert 来把格式转换成PIX_FMT_YUV420P。
-
-\section{绘制图像}
-
-但我们仍然需要告诉SDL 如何来实际显示我们给的数据。我们也会传递一个表明电影位置、应该缩放到什么宽度和高度的矩形参数给SDL 函数。这样，SDL为我们做缩放并且它可以通过使用显卡来进行快速缩放：
-
-\begin{lstlisting}
-SDL_Rect rect;
-
-  if(frameFinished) {
-    /* ... code ... */
-    // Convert the image into YUV format that SDL uses
-    img_convert(&pict, PIX_FMT_YUV420P,
-                    (AVPicture *)pFrame, pCodecCtx->pix_fmt,
-            pCodecCtx->width, pCodecCtx->height);
-
-    SDL_UnlockYUVOverlay(bmp);
-    rect.x = 0;
-    rect.y = 0;
-    rect.w = pCodecCtx->width;
-    rect.h = pCodecCtx->height;
-    SDL_DisplayYUVOverlay(bmp, &rect);
-  }
-\end{lstlisting}
+首先，我们将格式转换成PIX_FMT_YUV420P。清空renderer，使用SDL_UpdateTexture将YUV420P格式的数据更新到texture，然后使用SDL_RenderCopy将texture拷贝到renderer，最后显示这个renderer。
 
 现在我们的视频显示出来了！
 
