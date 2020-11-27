@@ -114,9 +114,6 @@ struct SwsContext *swsContext = sws_getContext(pCodecCtx->width, pCodecCtx->heig
 if (!swsContext){
   return -1;
 }
-if (sws_init_context(swsContext, NULL, NULL)<0){
-  return -1;
-}
 \end{lstlisting}
 
 SwsContext中包含了格式转换所需要的所有信息。最后，我们已经准备好来从流中读取数据了。
